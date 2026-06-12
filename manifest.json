@@ -1,0 +1,121 @@
+{
+  "id": "/signal-crypto/",
+  "name": "Signal — Crypto Live",
+  "short_name": "Signal",
+  "description": "Real-time crypto signals · Jawara Harian screener · 10 indikator berbobot · Entry, SL, TP1, TP2 otomatis",
+
+  "start_url": "./index.html",
+  "scope": "./",
+
+  "display": "standalone",
+  "display_override": ["window-controls-overlay", "standalone", "minimal-ui"],
+
+  "background_color": "#030712",
+  "theme_color": "#030712",
+
+  "orientation": "portrait-primary",
+  "lang": "id",
+  "dir": "ltr",
+
+  "prefer_related_applications": false,
+
+  "launch_handler": {
+    "client_mode": "navigate-existing"
+  },
+
+  "handle_links": "preferred",
+
+  "icons": [
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ],
+
+  "categories": ["finance", "utilities", "productivity"],
+
+  "screenshots": [
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "label": "Jawara Harian — 2 aset terbaik dengan composite score & breakdown",
+      "form_factor": "narrow"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "label": "Signal Cards — BUY / SELL / HOLD real-time 30 detik",
+      "form_factor": "narrow"
+    }
+  ],
+
+  "shortcuts": [
+    {
+      "name": "⚡ Jawara Harian",
+      "short_name": "Jawara",
+      "url": "./index.html",
+      "description": "2 aset terbaik untuk trading hari ini — langsung ke screener",
+      "icons": [{ "src": "icon-192.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "Sinyal BUY",
+      "short_name": "BUY",
+      "url": "./index.html?filter=BUY",
+      "description": "Semua aset dengan sinyal BUY aktif saat ini",
+      "icons": [{ "src": "icon-192.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "Sinyal SELL",
+      "short_name": "SELL",
+      "url": "./index.html?filter=SELL",
+      "description": "Semua aset dengan sinyal SELL aktif saat ini",
+      "icons": [{ "src": "icon-192.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "Semua Aset",
+      "short_name": "Semua",
+      "url": "./index.html?filter=ALL",
+      "description": "Lihat semua sinyal crypto sekaligus",
+      "icons": [{ "src": "icon-192.png", "sizes": "192x192" }]
+    }
+  ],
+
+  "share_target": {
+    "action": "./index.html",
+    "method": "GET",
+    "params": {
+      "title": "title",
+      "text":  "text",
+      "url":   "url"
+    }
+  },
+
+  "protocol_handlers": [
+    {
+      "protocol": "web+signal",
+      "url": "./index.html?ref=%s"
+    }
+  ]
+}
