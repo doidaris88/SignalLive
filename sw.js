@@ -1,84 +1,46 @@
-// ─────────────────────────────────────────────────────────────────
-//  Signal PWA · Service Worker v5
-//
-//  Strategi caching:
-//  ┌─────────────────────┬──────────────────────────────────────┐
-//  │ Request             │ Strategi                             │
-//  ├─────────────────────┼──────────────────────────────────────┤
-//  │ 1H klines           │ Network-first · cache TTL 60 menit  │
-//  │ IDR rate            │ Network-first · cache TTL 30 menit  │
-//  │ 15m klines + price  │ Network-first · no cache            │
-//  │ Static (html/json)  │ Cache-first · update background     │
-//  └─────────────────────┴──────────────────────────────────────┘
-//
-//  Message types (app → SW):
-//  · SIGNAL_ALERT   → push notif perubahan sinyal
-//  · JAWARA_FOUND   → push notif ⚡ jawara baru
-//  · SKIP_WAITING   → paksa aktivasi SW baru
-//  · GET_VERSION    → reply dengan versi cache
-//
-//  Message types (SW → app):
-//  · TRIGGER_SCREENER  → minta app jalankan runScreener()
-//  · VERSION           → reply versi cache
-// ─────────────────────────────────────────────────────────────────
+// Signal PWA · Service Worker v5.2
+// Fix: navigate = network-first (no stale HTML), API = no-cache
 
-const VER       = 'signal-v5.1';
-const H1_CACHE  = 'h1-klines-v5.1';
-const RATE_CACHE= 'rate-v5.1';
+const VER        = 'signal-v5.2';
+const H1_CACHE   = 'h1-v5.2';
+const RATE_CACHE = 'rate-v5.2';
+const VALID      = [VER, H1_CACHE, RATE_CACHE];
 
-const STATIC_ASSETS = ['./index.html', './manifest.json'];
+const H1_TTL   = 60 * 60 * 1000;
+const RATE_TTL = 30 * 60 * 1000;
 
-// TTL
-const H1_TTL   = 60 * 60 * 1000;   // 60 menit
-const RATE_TTL = 30 * 60 * 1000;   // 30 menit
-
-// Semua cache yang boleh hidup (sisanya dihapus saat activate)
-const VALID_CACHES = [VER, H1_CACHE, RATE_CACHE];
-
-// ── HELPERS ───────────────────────────────────────────────────────
 const API_HOSTS = [
-  'api.binance.com',
-  'api.bybit.com',
-  'api.gateio.ws',
-  'api.coingecko.com',
-  'open.er-api.com',
-  'api.exchangerate.host',
-  'fonts.googleapis.com',
-  'fonts.gstatic.com',
+  'api.binance.com','api.bybit.com','api.gateio.ws',
+  'api.coingecko.com','open.er-api.com','api.exchangerate.host',
+  'fonts.googleapis.com','fonts.gstatic.com',
 ];
 
-function classifyRequest(url) {
-  // 1H klines — perlu persistent cache (dipakai lintas sesi)
-  if (/interval=1h/.test(url) || /interval=1H/.test(url)) return 'H1';
-  // Rate IDR — cukup 30 menit
-  if (url.includes('open.er-api.com') || url.includes('exchangerate.host')) return 'RATE';
-  // Realtime market data — jangan cache
-  if (
-    url.includes('interval=15m') || url.includes('interval=15min') ||
-    url.includes('/ticker/') || url.includes('/spot/tickers') ||
-    url.includes('/v5/market/tickers') || url.includes('simple/price')
-  ) return 'LIVE';
-  // API lain
-  if (API_HOSTS.some(h => url.includes(h))) return 'API';
+function classify(url) {
+  if (/interval=1h/i.test(url))                  return 'H1';
+  if (url.includes('open.er-api.com') ||
+      url.includes('exchangerate.host'))           return 'RATE';
+  if (url.includes('interval=15m') ||
+      url.includes('interval=15min') ||
+      url.includes('/ticker/') ||
+      url.includes('/spot/tickers') ||
+      url.includes('/v5/market/tickers') ||
+      url.includes('simple/price'))               return 'LIVE';
+  if (API_HOSTS.some(h => url.includes(h)))       return 'API';
   return 'STATIC';
 }
 
-// ── INSTALL ───────────────────────────────────────────────────────
+// ── INSTALL ────────────────────────────────────────────────────────
 self.addEventListener('install', e => {
-  e.waitUntil(
-    caches.open(VER)
-      .then(c => c.addAll(STATIC_ASSETS))
-      .then(() => self.skipWaiting())
-  );
+  // Langsung aktif tanpa menunggu tab lama ditutup
+  e.waitUntil(self.skipWaiting());
 });
 
 // ── ACTIVATE ──────────────────────────────────────────────────────
-// Hapus cache lama, ambil alih semua client
 self.addEventListener('activate', e => {
   e.waitUntil(
     caches.keys()
       .then(keys => Promise.all(
-        keys.filter(k => !VALID_CACHES.includes(k)).map(k => caches.delete(k))
+        keys.filter(k => !VALID.includes(k)).map(k => caches.delete(k))
       ))
       .then(() => self.clients.claim())
   );
@@ -86,123 +48,142 @@ self.addEventListener('activate', e => {
 
 // ── FETCH ─────────────────────────────────────────────────────────
 self.addEventListener('fetch', e => {
-  const url = e.request.url;
-  const type = classifyRequest(url);
+  const req = e.request;
+  const url = req.url;
+  const type = classify(url);
 
-  // 1H klines → network-first + persistent cache 60 menit
+  // ① HTML navigate → selalu network-first (kode terbaru, bukan cache)
+  if (req.mode === 'navigate') {
+    e.respondWith(networkFirstHtml(req));
+    return;
+  }
+
+  // ② 1H klines → timed cache 60 menit
   if (type === 'H1') {
-    e.respondWith(timedCacheStrategy(e.request, H1_CACHE, H1_TTL));
+    e.respondWith(timedCache(req, H1_CACHE, H1_TTL));
     return;
   }
 
-  // IDR rate → network-first + cache 30 menit
+  // ③ IDR rate → timed cache 30 menit
   if (type === 'RATE') {
-    e.respondWith(timedCacheStrategy(e.request, RATE_CACHE, RATE_TTL));
+    e.respondWith(timedCache(req, RATE_CACHE, RATE_TTL));
     return;
   }
 
-  // Realtime & API lain → network only, no cache
+  // ④ Realtime market data → network only, no cache
   if (type === 'LIVE' || type === 'API') {
     e.respondWith(
-      fetch(e.request, { cache: 'no-store' })
-        .catch(() => offlineApiResponse())
+      fetch(req, { cache: 'no-store' }).catch(() => apiError())
     );
     return;
   }
 
-  // Static → cache-first, background revalidate
-  e.respondWith(staticStrategy(e.request));
+  // ⑤ Static assets (font, icon, dll) → cache-first
+  e.respondWith(staticFirst(req));
 });
 
-// ── STRATEGY: TIMED CACHE ─────────────────────────────────────────
-// Network-first. Jika sukses: simpan + tandai timestamp.
-// Jika gagal: serve stale jika masih dalam TTL, else error.
-async function timedCacheStrategy(req, cacheName, ttl) {
-  const cache  = await caches.open(cacheName);
-  const cached = await cache.match(req);
-
-  // Cek apakah cache masih fresh
-  if (cached) {
-    const ts = cached.headers.get('sw-cached-at');
-    if (ts && Date.now() - parseInt(ts, 10) < ttl) {
-      return cached; // fresh hit
-    }
-  }
-
-  // Ambil dari network
+// ── STRATEGY: HTML NETWORK-FIRST ──────────────────────────────────
+async function networkFirstHtml(req) {
   try {
     const res = await fetch(req, { cache: 'no-store' });
-    if (!res.ok) return cached || res;
-
-    // Rebuild response dengan header timestamp tambahan
-    const text = await res.text();
-    const stamped = new Response(text, {
-      status: res.status,
-      statusText: res.statusText,
-      headers: {
-        'Content-Type': res.headers.get('content-type') || 'application/json',
-        'Cache-Control': 'no-store',
-        'sw-cached-at': String(Date.now()),
-      },
-    });
-    await cache.put(req, stamped.clone());
-    return stamped;
+    if (res.ok) {
+      // Simpan ke cache untuk offline fallback
+      const c = await caches.open(VER);
+      c.put(req, res.clone());
+      return res;
+    }
+    // Server error → fallback ke cache
+    return (await caches.match(req)) || res;
   } catch {
-    // Network gagal → serve stale (expired pun lebih baik dari error)
-    if (cached) return cached;
-    return offlineApiResponse();
+    // Offline → cache fallback
+    return (await caches.match(req))
+      || (await caches.match('./index.html'))
+      || offlinePage();
   }
 }
 
-// ── STRATEGY: STATIC CACHE-FIRST ──────────────────────────────────
-async function staticStrategy(req) {
+// ── STRATEGY: TIMED CACHE ─────────────────────────────────────────
+async function timedCache(req, cacheName, ttl) {
+  const cache  = await caches.open(cacheName);
+  const cached = await cache.match(req);
+
+  if (cached) {
+    const ts = cached.headers.get('sw-ts');
+    if (ts && Date.now() - +ts < ttl) return cached;
+  }
+
+  try {
+    const res = await fetch(req, { cache: 'no-store' });
+    if (!res.ok) return cached || res;
+    const text = await res.text();
+    const stamped = new Response(text, {
+      status: res.status,
+      headers: {
+        'Content-Type': res.headers.get('content-type') || 'application/json',
+        'sw-ts': String(Date.now()),
+      },
+    });
+    cache.put(req, stamped.clone());
+    return stamped;
+  } catch {
+    return cached || apiError();
+  }
+}
+
+// ── STRATEGY: STATIC CACHE-FIRST ─────────────────────────────────
+async function staticFirst(req) {
   const cached = await caches.match(req);
   if (cached) {
-    // Background revalidate (stale-while-revalidate)
+    // Background revalidate
     fetch(req).then(async res => {
-      if (res && res.status === 200 && res.type !== 'opaque') {
-        const c = await caches.open(VER);
-        c.put(req, res);
+      if (res?.status === 200 && res.type !== 'opaque') {
+        (await caches.open(VER)).put(req, res);
       }
     }).catch(() => {});
     return cached;
   }
-
   try {
     const res = await fetch(req);
     if (req.method === 'GET' && res.status === 200 && res.type !== 'opaque') {
-      const c = await caches.open(VER);
-      c.put(req, res.clone());
+      (await caches.open(VER)).put(req, res.clone());
     }
     return res;
   } catch {
-    if (req.mode === 'navigate') {
-      const fallback = await caches.match('./index.html');
-      return fallback || offlinePageResponse();
-    }
     return new Response('Offline', { status: 503 });
   }
 }
 
-// ── OFFLINE FALLBACKS ─────────────────────────────────────────────
-function offlineApiResponse() {
+// ── FALLBACKS ─────────────────────────────────────────────────────
+function apiError() {
   return new Response(
     JSON.stringify({ error: 'offline', ts: Date.now() }),
     { status: 503, headers: { 'Content-Type': 'application/json' } }
   );
 }
-
-function offlinePageResponse() {
+function offlinePage() {
   return new Response(
-    '<html><body style="background:#030712;color:#94a3b8;font-family:monospace;padding:40px;text-align:center">'
-    + '<h2>⚡ Signal</h2><p>Offline · Buka aplikasi saat ada koneksi.</p></body></html>',
+    `<html><body style="background:#030712;color:#94a3b8;font-family:monospace;
+     padding:40px;text-align:center">
+     <h2 style="color:#00e5a0">⚡ Signal</h2>
+     <p>Offline · Buka saat ada koneksi internet.</p></body></html>`,
     { status: 200, headers: { 'Content-Type': 'text/html' } }
   );
 }
 
-// ── PUSH NOTIFICATION (dari server) ───────────────────────────────
+// ── MESSAGES ─────────────────────────────────────────────────────
+self.addEventListener('message', e => {
+  if (!e.data) return;
+  switch (e.data.type) {
+    case 'SIGNAL_ALERT': showSignalNotif(e.data); break;
+    case 'JAWARA_FOUND': showJawaraNotif(e.data); break;
+    case 'SKIP_WAITING': self.skipWaiting(); break;
+    case 'GET_VERSION':  e.source?.postMessage({ type:'VERSION', ver:VER }); break;
+  }
+});
+
+// ── PUSH ──────────────────────────────────────────────────────────
 self.addEventListener('push', e => {
-  let d = { title: '🔔 Signal', body: 'Sinyal berubah!', action: 'HOLD' };
+  let d = { title:'🔔 Signal', body:'Sinyal berubah!', action:'HOLD' };
   try { d = e.data.json(); } catch {}
   e.waitUntil(showSignalNotif(d));
 });
@@ -210,116 +191,59 @@ self.addEventListener('push', e => {
 // ── NOTIFICATION CLICK ────────────────────────────────────────────
 self.addEventListener('notificationclick', e => {
   e.notification.close();
-  const action = e.action; // 'view' atau 'dismiss'
-  if (action === 'dismiss') return;
-
+  if (e.action === 'dismiss') return;
   e.waitUntil(
-    clients.matchAll({ type: 'window', includeUncontrolled: true })
+    clients.matchAll({ type:'window', includeUncontrolled:true })
       .then(cs => {
-        // Prioritaskan window yang sudah visible
-        const active = cs.find(c => c.visibilityState === 'visible');
-        if (active) { active.focus(); return; }
-        if (cs.length > 0) { cs[0].focus(); return; }
+        const w = cs.find(c => c.visibilityState === 'visible') || cs[0];
+        if (w) { w.focus(); return; }
         return clients.openWindow('./index.html');
       })
   );
 });
 
-// ── MESSAGES DARI APP ─────────────────────────────────────────────
-self.addEventListener('message', e => {
-  if (!e.data) return;
-  switch (e.data.type) {
-
-    case 'SIGNAL_ALERT':
-      // { type, title, body, action }
-      showSignalNotif(e.data);
-      break;
-
-    case 'JAWARA_FOUND':
-      // { type, jawara: [{symbol, name, action, score}] }
-      showJawaraNotif(e.data);
-      break;
-
-    case 'SKIP_WAITING':
-      // App meminta SW baru langsung aktif (setelah toast update)
-      self.skipWaiting();
-      break;
-
-    case 'GET_VERSION':
-      // Debug: tanya versi cache yang aktif
-      e.source?.postMessage({ type: 'VERSION', ver: VER });
-      break;
-  }
-});
-
-// ── NOTIFICATION HELPERS ──────────────────────────────────────────
-function vibePattern(action) {
-  switch (action) {
-    case 'BUY':    return [100, 50, 100, 50, 200];       // 2 ketuk pendek + panjang
-    case 'SELL':   return [300, 100, 300];               // 2 ketuk panjang
-    case 'JAWARA': return [100, 40, 100, 40, 100, 40, 300]; // 3 cepat + panjang (khas ⚡)
-    default:       return [150, 100, 150];               // hold: 2 sedang
-  }
+// ── NOTIFICATION HELPERS ─────────────────────────────────────────
+function vibe(action) {
+  if (action==='BUY')    return [100,50,100,50,200];
+  if (action==='SELL')   return [300,100,300];
+  if (action==='JAWARA') return [100,40,100,40,100,40,300];
+  return [150,100,150];
 }
-
 function showSignalNotif(d) {
-  const emoji = d.action === 'BUY'  ? '🟢'
-              : d.action === 'SELL' ? '🔴' : '🟡';
-  const tag   = `signal-${(d.action || 'hold').toLowerCase()}`;
-  return self.registration.showNotification(`${emoji} ${d.title}`, {
-    body:     d.body,
-    icon:     './icon-192.png',
-    badge:    './icon-192.png',
-    tag,
-    renotify: true,
-    vibrate:  vibePattern(d.action),
-    actions:  [{ action: 'view', title: 'Lihat Signal' }],
-    data:     d,
+  const e = d.action==='BUY'?'🟢':d.action==='SELL'?'🔴':'🟡';
+  return self.registration.showNotification(`${e} ${d.title}`, {
+    body: d.body, icon:'./icon-192.png', badge:'./icon-192.png',
+    tag:`signal-${(d.action||'hold').toLowerCase()}`,
+    renotify:true, vibrate:vibe(d.action),
+    actions:[{action:'view',title:'Lihat Signal'}], data:d,
   });
 }
-
 function showJawaraNotif(d) {
-  // Format ringkas: "▲ SOL · ▼ HYPE"
-  const lines = (d.jawara || []).map(j => {
-    const arr = j.action === 'BUY' ? '▲' : '▼';
-    return `${arr} ${j.name} · Skor ${j.score}`;
-  });
-  const body = lines.join('\n') || 'Setup bersih terdeteksi — buka app.';
-
+  const lines = (d.jawara||[])
+    .map(j=>`${j.action==='BUY'?'▲':'▼'} ${j.name} · Skor ${j.score}`)
+    .join('\n') || 'Setup bersih terdeteksi.';
   return self.registration.showNotification('⚡ Jawara Harian Ditemukan', {
-    body,
-    icon:     './icon-192.png',
-    badge:    './icon-192.png',
-    tag:      'jawara-alert',
-    renotify: true,
-    vibrate:  vibePattern('JAWARA'),
-    actions:  [
-      { action: 'view',    title: '⚡ Lihat Jawara' },
-      { action: 'dismiss', title: 'Tutup' },
-    ],
-    data: d,
+    body:lines, icon:'./icon-192.png', badge:'./icon-192.png',
+    tag:'jawara-alert', renotify:true, vibrate:vibe('JAWARA'),
+    actions:[{action:'view',title:'⚡ Lihat'},{action:'dismiss',title:'Tutup'}],
+    data:d,
   });
 }
 
-// ── BACKGROUND SYNC (one-off, e.g. setelah reconnect) ────────────
+// ── SYNC ──────────────────────────────────────────────────────────
 self.addEventListener('sync', e => {
   if (e.tag === 'screener-sync') {
-    e.waitUntil(pingClients());
+    e.waitUntil(
+      clients.matchAll({type:'window'})
+        .then(cs => cs.forEach(c => c.postMessage({type:'TRIGGER_SCREENER'})))
+    );
   }
 });
-
-// ── PERIODIC BACKGROUND SYNC (Chrome Android, optional) ──────────
-// Membutuhkan izin 'periodic-background-sync' dan HTTPS.
-// App mendaftarkan tag 'screener-periodic' via reg.periodicSync.register()
 self.addEventListener('periodicsync', e => {
   if (e.tag === 'screener-periodic') {
-    e.waitUntil(pingClients());
+    e.waitUntil(
+      clients.matchAll({type:'window'})
+        .then(cs => cs.forEach(c => c.postMessage({type:'TRIGGER_SCREENER'})))
+    );
   }
 });
-
-// Kirim sinyal ke semua window client agar jalankan runScreener()
-function pingClients() {
-  return clients.matchAll({ type: 'window' }).then(cs => {
-    cs.forEach(c => c.postMessage({ type: 'TRIGGER_SCREENER' }));
-  });
-}
